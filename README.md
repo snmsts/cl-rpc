@@ -135,10 +135,10 @@ Browser / CLI client
    Lisp image  (SBCL)
 ```
 
-JSON serialization uses `com.inuoe.jzon` and writes directly to the WebSocket
-stream. There is no intermediate s-expression representation; eval return
-values are captured with `prin1-to-string` and stored as JSON strings in one
-step.
+JSON serialization uses a minimal inline implementation (no external library)
+and writes directly to the WebSocket stream. There is no intermediate
+s-expression representation; eval return values are captured with
+`prin1-to-string` and stored as JSON strings in one step.
 
 ## License
 
