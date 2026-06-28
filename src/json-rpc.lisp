@@ -77,6 +77,7 @@
          (if (char= (char str pos) #\})
              (values obj (1+ pos))
              (loop
+               (setf pos (%json-skip-ws str pos))
                (unless (char= (char str pos) #\")
                  (error "Expected string key in JSON object"))
                (multiple-value-bind (key kpos) (%json-parse-string str (1+ pos))
