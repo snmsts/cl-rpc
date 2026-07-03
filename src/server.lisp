@@ -77,6 +77,32 @@
   (write-http-response stream 404 "Not Found" "text/plain"
                        (micros/backend:string-to-utf8 "404 Not Found")))
 
+(defun read-request-body (stream lines)
+  "Read the Content-Length body of an HTTP request as a UTF-8 string, or NIL."
+  (let* ((cl  (cl-rpc/websocket:extract-header lines "Content-Length"))
+         (len (and cl (ignore-errors (parse-integer cl :junk-allowed t)))))
+    (when (and len (plusp len))
+      (let ((buf (make-array len :element-type '(unsigned-byte 8)))
+            (pos 0))
+        (loop while (< pos len)
+              for n = (read-sequence buf stream :start pos)
+              while (> n pos)
+              do (setf pos n))
+        (micros/backend:utf8-to-string (if (= pos len) buf (subseq buf 0 pos)))))))
+
+(defun handle-mcp-http (stream lines)
+  "MCP Streamable HTTP endpoint: the POST body is one JSON-RPC message; reply
+with the JSON-RPC response as application/json (or 202 Accepted with no body
+for a notification). Shares cl-rpc/mcp's dispatch, whose `eval` is the same
+read/eval/print used over WebSocket."
+  (let* ((body (read-request-body stream lines))
+         (resp (and body (cl-rpc/mcp:handle-mcp-message body))))
+    (if resp
+        (write-http-response stream 200 "OK" "application/json"
+                             (micros/backend:string-to-utf8 resp))
+        (write-http-response stream 202 "Accepted" "application/json"
+                             (micros/backend:string-to-utf8 "")))))
+
 (defun handle-http-get (stream request-path)
   "Serve a static file in response to a GET request."
   (unless *static-dir*
@@ -132,9 +158,13 @@
           (t
            (multiple-value-bind (method path)
                (parse-request-line (or (car lines) ""))
-             (if (and method (string= method "GET"))
-                 (handle-http-get stream path)
-                 (send-404 stream))))))
+             (cond
+               ;; MCP (Streamable HTTP): same JSON-RPC engine, another endpoint.
+               ((and method (string= method "POST") (string= path "/mcp"))
+                (handle-mcp-http stream lines))
+               ((and method (string= method "GET"))
+                (handle-http-get stream path))
+               (t (send-404 stream)))))))
     (end-of-file ()
       nil)
     (error (c)

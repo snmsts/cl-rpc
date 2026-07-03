@@ -8,4 +8,5 @@
                (:file "src/json-rpc")
                (:file "src/backend")
                (:file "src/handlers")
+               (:file "src/mcp")
                (:file "src/server")))

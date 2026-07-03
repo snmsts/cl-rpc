@@ -119,6 +119,28 @@ and `debug-return` are pushed from the server asynchronously at any time.
 Authentication is not handled by cl-rpc itself; delegate to a reverse proxy
 (nginx Basic Auth, JWT, etc.) if needed.
 
+## MCP endpoint
+
+The same server also speaks [MCP](https://modelcontextprotocol.io/) (Model
+Context Protocol) over Streamable HTTP at `POST /mcp` — MCP is JSON-RPC 2.0, the
+same family cl-rpc already speaks, so it reuses the existing eval engine. Point
+any MCP client at `http://<host>:<port>/mcp` and it gets one tool, `eval`, that
+evaluates a Common Lisp form inside the live image and returns the printed
+result. This lets an LLM agent inspect and drive a running Lisp process the same
+way a human uses the REPL.
+
+```
+POST /mcp   {"jsonrpc":"2.0","id":1,"method":"initialize", ...}
+POST /mcp   {"jsonrpc":"2.0","id":2,"method":"tools/list"}
+POST /mcp   {"jsonrpc":"2.0","id":3,"method":"tools/call",
+             "params":{"name":"eval","arguments":{"code":"(+ 1 2)"}}}
+```
+
+Each POST body is a single JSON-RPC message; the response comes back as
+`application/json`. eval output (stdout/compile notes) is isolated from the
+transport so it cannot corrupt the response. Authentication is out of scope —
+front it with a reverse proxy if exposed beyond localhost.
+
 ## Architecture
 
 ```

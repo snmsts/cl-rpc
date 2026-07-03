@@ -17,9 +17,16 @@
            #:send-response
            #:send-error
            #:send-notification
+           #:json-parse
+           #:json-stringify
            #:*debug-log*
            #:*real-error-output*
            #:%log))
+
+(defpackage #:cl-rpc/mcp
+  (:use #:cl)
+  (:import-from #:cl-rpc/json-rpc #:json-parse #:json-stringify)
+  (:export #:handle-mcp-message #:*server-name* #:*server-version*))
 
 (defpackage #:cl-rpc/backend
   (:use #:cl)
