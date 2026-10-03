@@ -128,14 +128,14 @@
           (push trimmed result))))))
 
 (defun extract-header (lines name)
-  "Return the value corresponding to the given header name (case-insensitive)."
-  (let ((prefix (concatenate 'string name ": ")))
-    (some (lambda (line)
-            (when (and (>= (length line) (length prefix))
-                       (string-equal prefix line :end2 (length prefix)))
-              (string-trim '(#\space #\return #\newline)
-                           (subseq line (length prefix)))))
-          lines)))
+  "Return the value corresponding to the given header name (case-insensitive).
+Whitespace around the value is optional (RFC 9110), so \"Origin:x\" is found too."
+  (some (lambda (line)
+          (let ((colon (position #\: line)))
+            (when (and colon (string-equal name line :end2 colon))
+              (string-trim '(#\space #\tab #\return #\newline)
+                           (subseq line (1+ colon))))))
+        lines))
 
 (defun compute-accept-key (client-key)
   "RFC 6455 Section 1.3: Compute the value of the Sec-WebSocket-Accept header."
