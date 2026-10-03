@@ -65,7 +65,8 @@ Start a server on the default port:
 Start with the bundled web client:
 
 ```lisp
-(cl-rpc:start-server :port 7654 :static-dir "/path/to/ws-lisp/client/browser")
+(cl-rpc:start-server :port 7654 :static-dir "/path/to/ws-lisp/client/browser"
+                     :allowed-origins (cl-rpc:loopback-origins 7654))
 ```
 
 Then open `http://localhost:7654` in a browser.
@@ -84,6 +85,30 @@ To stop the server:
 | `:host` | `"127.0.0.1"` | Address to bind to |
 | `:debug` | `nil` | `t` logs to `*error-output*`; pass a stream to redirect |
 | `:static-dir` | `nil` | Directory to serve static files from; `nil` disables |
+| `:allowed-origins` | `nil` | `t` = don't check. A list = a request carrying an `Origin` header must match one of them. Requests without `Origin` always pass, so the default `nil` admits CLI and MCP clients but no web page. |
+| `:allowed-hosts` | `(loopback-hosts port)` | `t` = don't check. A list = the `Host` header must match one of them; `nil` admits nobody. |
+| `:token` | `nil` | `nil` = no authentication. A string: a WebSocket client must send it as its first text frame, and an `/mcp` request must carry `Authorization: Bearer <token>`. |
+
+### Access control
+
+A running image behind cl-rpc is an eval endpoint, so by default only programs that
+are not web pages can reach it. Every request (WebSocket handshake, `/mcp`, static
+files) passes three independent gates, and must pass all of them:
+
+- **Origin.** Browser-page JavaScript always sends `Origin` and cannot remove it,
+  so with the default `:allowed-origins nil` no web page can connect. The bundled
+  browser client is itself a web page; serve it with
+  `:allowed-origins (cl-rpc:loopback-origins port)`.
+- **Host.** The `Host` header must name the loopback interface (`127.0.0.1:<port>`,
+  `localhost:<port>`, `[::1]:<port>`). This stops DNS rebinding. Behind a reverse
+  proxy, pass the names it forwards, or `t`.
+- **Token** (opt-in). Stops other local processes. An MCP client passes it as a
+  header, e.g. `claude mcp add --transport http lisp http://127.0.0.1:7654/mcp
+  --header "Authorization: Bearer <token>"`.
+
+A request refused by Origin or Host gets `403`; an `/mcp` request without the
+token gets `401`; a WebSocket client that sends anything but the token first is
+disconnected.
 
 ## Reference Clients
 
@@ -116,8 +141,8 @@ WebSocket → receive a `welcome` notification from the server (carrying
 `protocol-version`, `implementation`, and `implementation-version`) → begin
 sending JSON-RPC 2.0 request objects. Notifications such as `output`, `debug`,
 and `debug-return` are pushed from the server asynchronously at any time.
-Authentication is not handled by cl-rpc itself; delegate to a reverse proxy
-(nginx Basic Auth, JWT, etc.) if needed.
+See [Access control](#access-control) for what cl-rpc checks itself; for
+anything more (TLS, user accounts), put a reverse proxy in front.
 
 ## MCP endpoint
 
@@ -138,8 +163,9 @@ POST /mcp   {"jsonrpc":"2.0","id":3,"method":"tools/call",
 
 Each POST body is a single JSON-RPC message; the response comes back as
 `application/json`. eval output (stdout/compile notes) is isolated from the
-transport so it cannot corrupt the response. Authentication is out of scope —
-front it with a reverse proxy if exposed beyond localhost.
+transport so it cannot corrupt the response. `GET /mcp` answers `405`: there is
+no server-to-client stream. The [Access control](#access-control) gates apply here
+too.
 
 ## Architecture
 

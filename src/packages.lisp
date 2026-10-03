@@ -53,4 +53,6 @@
 (defpackage #:cl-rpc
   (:use #:cl)
   (:export #:start-server
-           #:stop-server))
+           #:stop-server
+           #:loopback-hosts
+           #:loopback-origins))

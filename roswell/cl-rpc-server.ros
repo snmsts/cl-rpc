@@ -17,7 +17,9 @@ exec ros -Q -- $0 "$@"
 
 (defun main (&key (port "7654") (host "127.0.0.1") (static-dir nil) &allow-other-keys)
   (let ((port (parse-integer port)))
-    (cl-rpc:start-server :port port :host host :static-dir static-dir)
+    (cl-rpc:start-server :port port :host host :static-dir static-dir
+                         ;; The bundled browser client is a web page: let its own origin in.
+                         :allowed-origins (and static-dir (cl-rpc:loopback-origins port)))
     (format t "~&Server started, waiting...~%")
     (finish-output)
     (loop (sleep 60))))

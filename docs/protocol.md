@@ -45,9 +45,11 @@ CL-RPC is designed as a replacement for SWANK/SLynk/Micros for contexts where JS
 ```
 Client                                  Server
   |                                       |
-  |------- TCP + WebSocket handshake ---->|
+  |------- TCP + WebSocket handshake ---->|  (403 if Origin / Host not allowed)
   |                                       |
-  |<------ notification: welcome ---------|  (server sends immediately)
+  |------- text frame: <token> ---------->|  (only when the server has a token)
+  |                                       |
+  |<------ notification: welcome ---------|
   |                                       |
   |------- request: eval ------------->   |
   |<------ notification: output --------- |  (zero or more, interleaved)
@@ -60,10 +62,11 @@ Client                                  Server
   |<------ WebSocket close frame -------- |
 ```
 
-1. The client opens a WebSocket connection to the server.
-2. Immediately after the handshake, the server sends a `welcome` notification. The client **must** wait for this notification before sending any requests.
-3. The client sends JSON-RPC requests and receives JSON-RPC responses and notifications.
-4. Either side may close the connection at any time using a standard WebSocket close frame.
+1. The client opens a WebSocket connection to the server. The server refuses the handshake with `403 Forbidden` when the request's `Origin` or `Host` header is not allowed (see `:allowed-origins` / `:allowed-hosts` in the README). Browser pages always send `Origin`, so by default they are refused.
+2. If the server was started with a token, the client's first frame must be a text frame holding exactly the token. Anything else closes the connection.
+3. The server then sends a `welcome` notification. The client **must** wait for this notification before sending any requests.
+4. The client sends JSON-RPC requests and receives JSON-RPC responses and notifications.
+5. Either side may close the connection at any time using a standard WebSocket close frame.
 
 ---
 

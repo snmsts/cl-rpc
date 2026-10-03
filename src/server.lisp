@@ -59,8 +59,10 @@
       (read-sequence buf in)
       buf)))
 
-(defun write-http-response (stream status-code status-text content-type body-octets)
-  "Write an HTTP/1.1 response to a binary stream."
+(defun write-http-response (stream status-code status-text content-type body-octets
+                            &optional extra-headers)
+  "Write an HTTP/1.1 response to a binary stream.
+EXTRA-HEADERS is a list of (name . value) added after Content-Length."
   (let ((crlf (coerce '(13 10) '(vector (unsigned-byte 8)))))
     (flet ((write-header-line (str)
              (write-sequence (string-to-ascii-octets str) stream)
@@ -68,6 +70,8 @@
       (write-header-line (format nil "HTTP/1.1 ~D ~A" status-code status-text))
       (write-header-line (format nil "Content-Type: ~A" content-type))
       (write-header-line (format nil "Content-Length: ~D" (length body-octets)))
+      (loop for (name . value) in extra-headers
+            do (write-header-line (format nil "~A: ~A" name value)))
       (write-header-line "Connection: close")
       (write-sequence crlf stream)
       (write-sequence body-octets stream)
@@ -76,6 +80,71 @@
 (defun send-404 (stream)
   (write-http-response stream 404 "Not Found" "text/plain"
                        (micros/backend:string-to-utf8 "404 Not Found")))
+
+(defun send-status (stream code text &optional extra-headers)
+  (write-http-response stream code text "text/plain"
+                       (micros/backend:string-to-utf8 (format nil "~D ~A" code text))
+                       extra-headers))
+
+;;; -----------------------------------------------------------------------
+;;; Access control
+;;; -----------------------------------------------------------------------
+;;; Three independent gates, set by start-server. A request must pass all of them.
+;;;   *allowed-origins* — checked on every request (WebSocket handshake, /mcp, static).
+;;;   *allowed-hosts*   — likewise; stops DNS rebinding.
+;;;   *auth-token*      — WebSocket: the first text frame; /mcp: Authorization: Bearer.
+;;; Browser-page JavaScript always sends Origin and cannot remove it, so the default
+;;; *allowed-origins* (nil: no Origin allowed) keeps every web page out, while CLI and
+;;; MCP clients, which send none, get in.
+
+(defvar *allowed-origins* nil
+  "Origins allowed to connect: T = don't check; a list = a request with an Origin
+header must match one of them (case-insensitively). A request without Origin always
+passes, so NIL (the empty list) admits only clients that send none.")
+
+(defvar *allowed-hosts* t
+  "Host header values allowed: T = don't check; a list = the Host header must match
+one of them (case-insensitively). NIL admits nobody.")
+
+(defvar *auth-token* nil
+  "NIL = no authentication. A string = the secret a WebSocket client must send as its
+first text frame, and an /mcp request must carry as Authorization: Bearer <token>.")
+
+(defun loopback-hosts (port)
+  "Host header values naming this machine's loopback interface on PORT."
+  (list (format nil "127.0.0.1:~D" port)
+        (format nil "localhost:~D" port)
+        (format nil "[::1]:~D" port)))
+
+(defun loopback-origins (port)
+  "Origins of pages served from this machine's loopback interface on PORT, e.g. the
+bundled browser client served via :static-dir."
+  (mapcar (lambda (h) (format nil "http://~A" h)) (loopback-hosts port)))
+
+(defun %allowed-p (value allowed)
+  (or (eq allowed t)
+      (and value (member value allowed :test #'string-equal) t)))
+
+(defun request-admitted-p (lines)
+  "Apply the Origin and Host gates to a request's header LINES. Logs a rejection."
+  (let ((origin (cl-rpc/websocket:extract-header lines "Origin"))
+        (host   (cl-rpc/websocket:extract-header lines "Host")))
+    (cond ((and origin (not (%allowed-p origin *allowed-origins*)))
+           (cl-rpc/json-rpc::%log "~&[reject] Origin ~A not allowed~%" origin)
+           nil)
+          ((not (%allowed-p host *allowed-hosts*))
+           (cl-rpc/json-rpc::%log "~&[reject] Host ~A not allowed~%" host)
+           nil)
+          (t t))))
+
+(defun bearer-token-p (lines)
+  "True when no token is required or the request carries Authorization: Bearer <token>."
+  (or (null *auth-token*)
+      (let ((auth (cl-rpc/websocket:extract-header lines "Authorization")))
+        (and auth
+             (> (length auth) 7)
+             (string-equal "Bearer " auth :end2 7)
+             (string= *auth-token* (string-trim " " (subseq auth 7)))))))
 
 (defun read-request-body (stream lines)
   "Read the Content-Length body of an HTTP request as a UTF-8 string, or NIL."
@@ -95,6 +164,10 @@
 with the JSON-RPC response as application/json (or 202 Accepted with no body
 for a notification). Shares cl-rpc/mcp's dispatch, whose `eval` is the same
 read/eval/print used over WebSocket."
+  (unless (bearer-token-p lines)
+    (cl-rpc/json-rpc::%log "~&[reject] /mcp without a valid bearer token~%")
+    (send-status stream 401 "Unauthorized" '(("WWW-Authenticate" . "Bearer")))
+    (return-from handle-mcp-http))
   (let* ((body (read-request-body stream lines))
          (resp (and body (cl-rpc/mcp:handle-mcp-message body))))
     (if resp
@@ -127,11 +200,19 @@ read/eval/print used over WebSocket."
 ;;; -----------------------------------------------------------------------
 
 (defun handle-websocket-connection (stream lines)
-  "Perform the WebSocket handshake and run the frame receive loop."
+  "Perform the WebSocket handshake and run the frame receive loop.
+When *auth-token* is set, the first text frame must be exactly the token; anything
+else closes the connection. The welcome is sent only after that."
   (cl-rpc/websocket:handshake stream :lines lines)
   (let ((state (cl-rpc/handlers:make-connection-state
                 :backend   (make-instance 'cl-rpc/backend:backend)
                 :ws-stream stream)))
+    (when *auth-token*
+      (multiple-value-bind (type payload) (cl-rpc/websocket:read-frame stream)
+        (unless (and (eq type :text) (string= payload *auth-token*))
+          (cl-rpc/json-rpc::%log "~&[reject] bad or missing auth token; closing~%")
+          (cl-rpc/websocket:write-close-frame stream)
+          (return-from handle-websocket-connection))))
     (cl-rpc/handlers:send-welcome state)
     (loop
       (multiple-value-bind (type payload)
@@ -153,6 +234,8 @@ read/eval/print used over WebSocket."
       (let* ((lines   (cl-rpc/websocket:read-http-request-lines stream))
              (upgrade (cl-rpc/websocket:extract-header lines "Upgrade")))
         (cond
+          ((not (request-admitted-p lines))
+           (send-status stream 403 "Forbidden"))
           ((and upgrade (string-equal upgrade "websocket"))
            (handle-websocket-connection stream lines))
           (t
@@ -162,6 +245,9 @@ read/eval/print used over WebSocket."
                ;; MCP (Streamable HTTP): same JSON-RPC engine, another endpoint.
                ((and method (string= method "POST") (string= path "/mcp"))
                 (handle-mcp-http stream lines))
+               ;; No server-to-client SSE stream: the spec's answer is 405.
+               ((equal path "/mcp")
+                (send-status stream 405 "Method Not Allowed" '(("Allow" . "POST"))))
                ((and method (string= method "GET"))
                 (handle-http-get stream path))
                (t (send-404 stream)))))))
@@ -183,13 +269,24 @@ read/eval/print used over WebSocket."
 (defvar *server-thread* nil
   "The server's main thread.")
 
-(defun start-server (&key (port 7654) (host "127.0.0.1") debug static-dir)
+(defun start-server (&key (port 7654) (host "127.0.0.1") debug static-dir
+                          allowed-origins (allowed-hosts (loopback-hosts port)) token)
   "Start the WebSocket + JSON-RPC server.
-   port:       port to listen on (default 7654)
-   host:       address to bind to (default \"127.0.0.1\")
-   debug:      nil=disabled, t=log to *error-output*, stream=log to that stream
-   static-dir: directory to serve static files from (nil disables static serving)"
+   port:            port to listen on (default 7654)
+   host:            address to bind to (default \"127.0.0.1\")
+   debug:           nil=disabled, t=log to *error-output*, stream=log to that stream
+   static-dir:      directory to serve static files from (nil disables static serving)
+   allowed-origins: t = don't check; a list = a request carrying Origin must match one.
+                    Default nil: only requests without Origin (i.e. no web page) pass.
+                    The bundled browser client needs (loopback-origins port).
+   allowed-hosts:   t = don't check; a list = the Host header must match one; nil = nobody.
+                    Default (loopback-hosts port).
+   token:           nil = no authentication (default). A string: WebSocket clients send it
+                    as their first text frame, /mcp requests as Authorization: Bearer <token>."
   (setf cl-rpc/json-rpc:*debug-log* debug)
+  (setf *allowed-origins* allowed-origins
+        *allowed-hosts*   allowed-hosts
+        *auth-token*      token)
   (setf *static-dir* (when static-dir (uiop:ensure-directory-pathname static-dir)))
   (when *server-socket*
     (warn "Server is already running. Call stop-server first."))
